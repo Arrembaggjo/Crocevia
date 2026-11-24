@@ -83,6 +83,7 @@ input{font:inherit}
 .qrbox img,.qrbox canvas{width:228px!important;height:228px!important}
 .code{font-family:Cinzel,serif;font-size:54px;letter-spacing:.2em;color:var(--gold)}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 24px}
+.kick{margin-left:6px;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);background:rgba(243,236,223,.08);color:inherit;font-size:14px;line-height:1;cursor:pointer;padding:0}
 #bibwrap{position:absolute;inset:0;z-index:40;background:#0d0c10}
 #bibwrap iframe,#pbib iframe{width:100%;height:100%;border:0;display:block}
 #pbib{position:fixed;inset:0;z-index:70;background:#0d0c10}
@@ -677,7 +678,16 @@ function save() { lsSet(KEY, JSON.stringify(S)); }
 function commit() { save(); NET.all({t:'state', s:S}); renderTablet(); }
 function logIt(t) { S.log.unshift(t); S.log = S.log.slice(0, 6); }
 function toastTo(pid, text) { NET.sendTo(pid, {t:'toast', text}); }
-function setOnline(pid, v) { if (S.players[pid]) { S.players[pid].online = v; renderTablet(); } }
+function setOnline(pid, v) { if (S.players[pid]) { S.players[pid].online = v; if (!v) sweepPlayers(); else renderTablet(); } }
+function sweepPlayers() {
+  if (!S || DEMO) return; const now = Date.now(); let ch = false;
+  Object.values(S.players).forEach(p => {
+    if (p.online && now - (p.seen || 0) > 15000) { p.online = false; ch = true; }
+    if (S.phase === 'lobby' && !p.online && !p.hero) { delete S.players[p.pid]; ch = true; }
+  });
+  if (ch) commit(); else renderTablet();
+}
+function kickPlayer(pid) { if (S.players[pid]) { delete S.players[pid]; commit(); } }
 function hpMax(p) { const h = heroOf(p); if (!h) return 0; return h.hp + ((p.lessons || []).some(l => l.id === 'pelle' && l.stato === 'attiva') ? 8 : 0); }
 const SHARED = ['714380'];
 const PROVA = {armi:['482917', '593184', '627451'], armatura:'714380', pozioni:['815263', '826374', '837485']};   // il kit stampato per la serata di prova   // carte di prova stampate in più copie con lo stesso codice
@@ -704,12 +714,16 @@ function hostHandle(pid, m) {
       const used = Object.values(S.players).map(q => q.color);
       p = S.players[pid] = {pid, color:COLORS.find(c => !used.includes(c)) || COLORS[Object.keys(S.players).length % 6], coll:[], hero:null, equip:{}, corone:20, hp:0, lessons:[], node:'Ps', inside:null, move:null, mseq:0, joined:Date.now(), online:true};
     }
-    p.online = true;
+    p.online = true; p.seen = Date.now();
     if (p.move) { p.move = null; } // un cammino interrotto riparte da fermo
     commit(); NET.sendTo(pid, {t:'state', s:S});
     return;
   }
   if (!p) return;
+  p.seen = Date.now();
+  if (m.t === 'ping') { if (!p.online) { p.online = true; commit(); } return; }
+  if (m.t === 'bye') { p.online = false; sweepPlayers(); return; }
+  if (!p.online) p.online = true;
   const H = heroOf(p);
   switch (m.t) {
     case 'add': {
@@ -717,6 +731,12 @@ function hostHandle(pid, m) {
       const c = CARDS[code];
       if (!c) return toastTo(pid, 'Codice non trovato. Controlla le 6 cifre sul retro della carta.');
       const o = owner(code);
+      if (o && o.pid !== pid && !o.online) {   // stesso giocatore rientrato da un'altra pagina: riprende tutto da dove era
+        const old = o, mine = p.coll.slice();
+        S.players[pid] = Object.assign({}, old, {pid, online:true, seen:Date.now(), move:null, coll:[...new Set(old.coll.concat(mine))]});
+        delete S.players[old.pid];
+        commit(); toastTo(pid, 'Bentornato: ' + (heroOf(S.players[pid]) ? heroOf(S.players[pid]).name : 'la tua collezione') + ' riprende da dove era.'); return;
+      }
       if (o) return toastTo(pid, o.pid === pid ? 'Questa carta è già nella tua collezione.' : 'Questa carta è già nella collezione di ' + (heroOf(o) ? heroOf(o).name : 'un altro giocatore') + '.');
       p.coll.push(code);
       let msg = c.name + ' entra nella tua collezione.';
@@ -827,7 +847,8 @@ function waitingAt(place) { return inGame().filter(p => p.inside === place && !p
 
 function tabletAction(a) {
   if (a === 'shuffle') { demoRandom(); return; }
-  if (a === 'start') { S.phase = 'prologo'; S.step = 0; inGame().forEach(p => { p.node = 'Ps'; p.inside = null; p.move = null; p.hp = hpMax(p); }); commit(); }
+  if (a.startsWith('kick:')) { kickPlayer(a.slice(5)); return; }
+  if (a === 'start') { if (!DEMO) Object.values(S.players).forEach(p => { if (!p.online || !p.hero) delete S.players[p.pid]; }); S.phase = 'prologo'; S.step = 0; inGame().forEach(p => { p.node = 'Ps'; p.inside = null; p.move = null; p.hp = hpMax(p); }); commit(); }
   if (a === 'next') { if (S.step < PROLOGO.length - 1) S.step++; else { S.phase = 'allarme'; S.diario = [{id:'biblioteca', by:null, stato:'in corso'}]; } commit(); }
   if (a === 'back') { if (S.step > 0) S.step--; commit(); }
   if (a === 'pnext') { if (S.pstep < PREMIO.length - 1) S.pstep++; commit(); }
@@ -896,7 +917,7 @@ function renderTablet() {
   });
   if (S.phase !== 'lobby') {
     side += `<div class="glass sec"><h3>DIARIO DEL GRUPPO</h3>${S.diario.length ? S.diario.map(d => { const mi = MISSIONI.find(x => x.id === d.id); return `<div class="mrow"><div style="font-weight:600">${esc(mi.name)}</div><div class="muted" style="font-size:12px;margin-top:2px">${mi.tipo} · ${'★'.repeat(mi.stelle)} · ${d.stato}</div></div>`; }).join('') : '<div class="muted" style="font-size:14px">Nessuna missione.</div>'}</div>`;
-    side += `<div class="glass sec"><h3>GIOCATORI</h3>${players.filter(p => p.hero).map(p => { const h = heroOf(p); return `<div class="prow"><span class="dot" style="background:${p.color}"></span><div style="flex:1;min-width:0"><div style="font-weight:600">${esc(h.name)} ${p.online ? '' : '<span class="muted" style="font-size:12px">· scollegato</span>'}</div><div class="muted" style="font-size:12px">${esc(h.razza)} · ${esc(h.classe)}</div></div><div style="text-align:right;font-size:13px"><div>HP ${p.hp}/${hpMax(p)}</div><div class="gold">${p.corone} corone</div></div></div>`; }).join('')}</div>`;
+    side += `<div class="glass sec"><h3>GIOCATORI</h3>${players.filter(p => p.hero).map(p => { const h = heroOf(p); return `<div class="prow"><span class="dot" style="background:${p.color}"></span><div style="flex:1;min-width:0"><div style="font-weight:600">${esc(h.name)} ${p.online ? '' : `<span class="muted" style="font-size:12px">· scollegato</span> <button class="kick" data-a="kick:${p.pid}" aria-label="Togli ${esc(h.name)}">×</button>`}</div><div class="muted" style="font-size:12px">${esc(h.razza)} · ${esc(h.classe)}</div></div><div style="text-align:right;font-size:13px"><div>HP ${p.hp}/${hpMax(p)}</div><div class="gold">${p.corone} corone</div></div></div>`; }).join('')}</div>`;
     if (S.log.length) side += `<div class="glass sec"><h3>IN CITTÀ</h3>${S.log.map(t => `<div class="mrow muted">${esc(t)}</div>`).join('')}</div>`;
     if (!DEMO) side += `<div style="margin-top:auto;display:flex;gap:10px;align-items:center"><div id="qrmini" style="background:#F3ECDF;padding:6px;border-radius:8px;width:84px;height:84px"></div><div style="font-size:12px" class="muted">Per rientrare<br><span class="cz gold" style="font-size:22px;letter-spacing:.15em">${S.code}</span><br>Collegamento: ${esc(netStatus)}</div></div>
     `;
@@ -906,14 +927,14 @@ function renderTablet() {
   // overlay
   let ov = '';
   if (S.phase === 'lobby') {
-    const ready = players.length && players.every(p => p.hero);
+    const live = players.filter(p => p.online || p.hero), ready = players.some(p => p.hero && p.online) && players.filter(p => p.online).every(p => p.hero);
     ov = `<div class="overlay"><div class="glass lobby">${DEMO ? '' : '<div class="qrbox" id="qrbig"></div>'}<div style="flex:1;min-width:0">
       <div class="muted cz" style="font-size:13px;letter-spacing:.22em">GODS’ TOURNAMENT · PROVA DELLA CITTÀ</div>
       <h1 style="font-size:44px;margin:8px 0 6px">Crocevia</h1>
       ${DEMO ? '<p class="muted" style="font-size:16px">Prova veloce: tre eroi a caso con il kit di prova (Spada, Arco o Martello, Cotta d’Argento e una pozione). Entrate in Crocevia, oppure rimescolate.</p>' : `<p class="muted" style="font-size:16px">Inquadrate il QR con il telefono, poi caricate le vostre carte con i codici.</p>
       <div class="code" style="margin-top:14px">${S.code}</div>
       <div class="muted" style="font-size:12px;word-break:break-all">${esc(joinURL())}</div>`}
-      <div class="chips">${players.length ? players.map(p => `<span class="pill"><span class="dot" style="background:${p.color}"></span>${p.hero ? esc(heroOf(p).name) : 'sceglie l’eroe…'}</span>`).join('') : '<span class="muted">Nessun giocatore collegato.</span>'}</div>
+      <div class="chips">${live.length ? live.map(p => `<span class="pill" style="${p.online ? '' : 'opacity:.55'}"><span class="dot" style="background:${p.color}"></span>${p.hero ? esc(heroOf(p).name) : 'sceglie l’eroe…'}${p.online ? '' : ' · scollegato'}${DEMO ? '' : `<button class="kick" data-a="kick:${p.pid}" aria-label="Togli ${p.hero ? esc(heroOf(p).name) : 'questo giocatore'}">×</button>`}</span>`).join('') : '<span class="muted">Nessun giocatore collegato.</span>'}</div>${live.some(p => !p.online) ? '<div class="muted" style="font-size:13px;margin:-14px 0 16px">Chi è scollegato non entra: tocca × per toglierlo, oppure riapra la pagina e riscriva il codice del suo eroe.</div>' : ''}
       <button class="btn ${ready ? 'pulse' : ''}" data-a="start" ${ready ? '' : 'disabled'}>Entrate in Crocevia</button>
       ${DEMO ? '<button class="btn ghost small" data-a="shuffle" style="margin-top:10px">Rimescola eroi ed equipaggiamento</button>' : ''}
       <div class="muted" style="font-size:12px;margin-top:10px">Collegamento: ${esc(netStatus)}</div></div></div></div>`;
@@ -946,6 +967,7 @@ function renderTablet() {
   syncAnims();
 }
 function startTablet() {
+  setInterval(sweepPlayers, 4000);
   if (DEMO) {
     setTimeout(() => { if (S.phase === 'lobby' && !Object.values(S.players).some(p => p.hero)) demoRandom(); }, 1200);
     $('#app').innerHTML = `<div id="demo" data-view="tavolo"><div class="dbar"><button data-v="tavolo" class="on">Tavolo</button><button data-v="1">Telefono 1</button><button data-v="2">Telefono 2</button><button data-v="3">Telefono 3</button></div><div id="troot"></div><div class="pcol"><div class="psw"><button data-ph="1" class="on">Telefono 1</button><button data-ph="2">Telefono 2</button><button data-ph="3">Telefono 3</button></div><div class="pframe"><iframe id="f1" title="Telefono 1"></iframe><iframe id="f2" title="Telefono 2" style="display:none"></iframe><iframe id="f3" title="Telefono 3" style="display:none"></iframe></div></div></div>`;
@@ -979,6 +1001,7 @@ function toast(text) {
 }
 function startPhone() {
   MYPID = CFG.pid || Q.get('pid') || lsGet('gt_pid'); if (!MYPID) { MYPID = 'p' + Math.random().toString(36).slice(2, 10); lsSet('gt_pid', MYPID); }
+  if (!IFR) { setInterval(() => { try { NET.send && NET.send({t:'ping'}); } catch (e) {} }, 5000); window.addEventListener('pagehide', () => { try { NET.send && NET.send({t:'bye'}); } catch (e) {} }); }
   $('#app').innerHTML = `<div id="ph"><header id="phead"></header><main id="pmain"><div class="pane" id="pcitta" style="padding:0">${mapSVG('pmap')}<button class="btn ghost fab glass" id="center">Centra</button><div id="pbanner"></div></div><div class="pane" id="pcoll" style="display:none"></div><div class="pane" id="pdiario" style="display:none"></div><div id="psheet"></div><div id="pfull"></div></main><nav id="pnav"><button data-t="citta" class="on">Città</button><button data-t="coll">Collezione</button><button data-t="diario">Diario</button></nav></div>`;
   NET.client(ROOM, MYPID, m => {
     if (m.t === 'state') { const first = !S; S = m.s; if (first || !vbInit) centerOnMe(true); renderPhone(); syncAnims(); }
